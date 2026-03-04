@@ -401,6 +401,20 @@ func (h *ImageHandler) exportImage(img *vips.ImageRef, format string, quality in
 	if format == "" {
 		format = "jpg"
 	}
+
+	// Scale quality based on format to match JPEG visual fidelity
+	if quality > 0 {
+		switch format {
+		case "avif":
+			quality = int(float64(quality) * 0.75)
+		case "jxl":
+			quality = int(float64(quality) * 0.90)
+		}
+		if quality < 1 {
+			quality = 1
+		}
+	}
+
 	var buf []byte
 	var contentType string
 	var err error
