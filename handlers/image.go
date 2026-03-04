@@ -213,7 +213,8 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 	var addFile func(name string, data []byte) error
 	var closeArchive func() error
 
-	if archiveType == "zip" {
+	switch archiveType {
+	case "zip":
 		c.Set("Content-Type", "application/zip")
 		c.Set("Content-Disposition", "attachment; filename=\"images.zip\"")
 		zw := zip.NewWriter(c.Response().BodyWriter())
@@ -226,7 +227,7 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 			return err
 		}
 		closeArchive = zw.Close
-	} else if archiveType == "tar" {
+	case "tar":
 		c.Set("Content-Type", "application/x-tar")
 		c.Set("Content-Disposition", "attachment; filename=\"images.tar\"")
 		tw := tar.NewWriter(c.Response().BodyWriter())
@@ -244,7 +245,7 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 			return err
 		}
 		closeArchive = tw.Close
-	} else {
+	default:
 		// Default: tar.gz
 		c.Set("Content-Type", "application/x-tar+gzip")
 		c.Set("Content-Disposition", "attachment; filename=\"images.tar.gz\"")
