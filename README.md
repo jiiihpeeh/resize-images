@@ -13,6 +13,7 @@ A high-performance image resizing microservice built in Go using Fiber and libvi
 - **Resolution-based effort scaling**: Automatically adjusts encoding effort based on image size
 - **Constraints for expensive formats**: Configurable limits for AVIF and JPEG XL
 - **Docker support**: Easy deployment with Docker
+- **Web Interface**: Built-in Preact-based web UI for easy interaction.
 
 
 ## Quick Start
