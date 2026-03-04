@@ -223,6 +223,7 @@
                 setMessage('');
 
                 setStatusText('Uploading...');
+                setUploadProgress(0);
                 const formData = new FormData();
                 formData.append('image', file);
 
@@ -236,16 +237,11 @@
                 formData.append('tasks', JSON.stringify(apiTasks));
 
                 const xhr = new XMLHttpRequest();
-                const progressBarContainer = document.getElementById('progress-container');
-                const progressBar = document.getElementById('progress-bar');
                 
-                if(progressBarContainer) progressBarContainer.style.display = 'block';
-                if(progressBar) progressBar.style.width = '0%';
-
                 xhr.upload.addEventListener('progress', (event) => {
-                    if (event.lengthComputable && progressBar) {
+                    if (event.lengthComputable) {
                         const percentComplete = (event.loaded / event.total) * 100;
-                        progressBar.style.width = percentComplete + '%';
+                        setUploadProgress(percentComplete);
                         if (percentComplete === 100) {
                             setStatusText('Processing...');
                         }
@@ -254,8 +250,6 @@
 
                 xhr.addEventListener('load', () => {
                     setLoading(false);
-                    if(progressBarContainer) progressBarContainer.style.display = 'none';
-
                     if (xhr.status === 200) {
                         const blob = xhr.response;
                         const url = URL.createObjectURL(blob);
@@ -272,7 +266,6 @@
 
                 xhr.addEventListener('error', () => {
                     setLoading(false);
-                    if(progressBarContainer) progressBarContainer.style.display = 'none';
                     setMessage({ type: 'error', text: 'Upload failed due to a network error.' });
                 });
 
@@ -341,11 +334,11 @@
 
                         <button type="submit" disabled=${loading}>${loading ? statusText : 'Process Images'}</button>
 
-                        <div id="progress-container" style="display: none;">
+                        ${loading && uploadProgress < 100 && html`
                             <div class="progress-bar-container">
-                                <div id="progress-bar" class="progress-bar"></div>
+                                <div class="progress-bar" style=${{width: `${uploadProgress}%`}}></div>
                             </div>
-                        </div>
+                        `}
                     </form>
 
                     ${message && html`<div class=${`msg ${message.type}`}>${message.text}</div>`}
