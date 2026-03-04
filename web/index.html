@@ -197,6 +197,8 @@
             const [message, setMessage] = useState('');
             const [loading, setLoading] = useState(false);
             const [result, setResult] = useState(null);
+            const [statusText, setStatusText] = useState('Processing...');
+            const [uploadProgress, setUploadProgress] = useState(0);
 
             const addTask = () => {
                 setTasks([...tasks, { width: '', height: '', format: 'jpg', quality: '80', prefix: '' }]);
@@ -255,11 +257,17 @@
                         const url = URL.createObjectURL(blob);
                         setResult({ url });
                     } else {
-                        try {
-                            const data = JSON.parse(xhr.responseText);
-                            setMessage({ type: 'error', text: data.error || 'Processing failed' });
-                        } catch (err) {
-                            setMessage({ type: 'error', text: `Request failed with status ${xhr.status}` });
+                        if (xhr.response instanceof Blob) {
+                            const reader = new FileReader();
+                            reader.onload = () => {
+                                try {
+                                    const data = JSON.parse(reader.result);
+                                    setMessage({ type: 'error', text: data.error || 'Processing failed' });
+                                } catch (e) {
+                                    setMessage({ type: 'error', text: `Request failed with status ${xhr.status}` });
+                                }
+                            };
+                            reader.readAsText(xhr.response);
                         }
                     }
                 });
