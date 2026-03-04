@@ -406,9 +406,9 @@ func (h *ImageHandler) exportImage(img *vips.ImageRef, format string, quality in
 	if quality > 0 {
 		switch format {
 		case "avif":
-			quality = int(float64(quality) * 0.8)
+			quality = int(float64(quality) * 0.78)
 		case "jxl":
-			quality = int(float64(quality) * 0.75)
+			quality = int(float64(quality) * 0.70)
 		}
 		if quality < 1 {
 			quality = 1
