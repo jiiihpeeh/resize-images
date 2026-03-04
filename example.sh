@@ -53,9 +53,9 @@ batch_resize() {
   # 2. A 400px wide WebP with 75% quality
   # 3. A 200px wide PNG with a custom prefix
   TASKS='[
-    {"width": 800, "format": "jpg", "prefix": "large"},
-    {"width": 400, "format": "webp", "quality": 75, "prefix": "medium"},
-    {"width": 200, "format": "png", "prefix": "thumb"}
+    {"width": 800, "format": ["jpg"], "key": "large"},
+    {"width": 400, "format": ["webp"], "quality": 75, "key": "medium"},
+    {"width": 200, "format": ["png"], "key": "thumb"}
   ]'
 
   # Make the request

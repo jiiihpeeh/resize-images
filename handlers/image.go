@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -23,13 +24,13 @@ type ImageHandler struct {
 	cfg *config.Config
 }
 
-type ResizeTask struct {
-	Width    int    `json:"width"`
-	Height   int    `json:"height"`
-	Format   string `json:"format"`
-	Quality  int    `json:"quality"`
-	Lossless bool   `json:"lossless"`
-	Prefix   string `json:"prefix"`
+type ResizeBatchJob struct {
+	Key      string   `json:"key"`
+	Width    int      `json:"width"`
+	Height   int      `json:"height"`
+	Formats  []string `json:"format"`
+	Quality  int      `json:"quality"`
+	Lossless bool     `json:"lossless"`
 }
 
 func NewImageHandler(cfg *config.Config) *ImageHandler {
@@ -153,15 +154,15 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 	defer img.Close()
 
 	// 6. Parse tasks
-	var tasks []ResizeTask
-	tasksStr := c.FormValue("tasks")
-	if tasksStr == "" {
-		tasksStr = c.Query("tasks")
+	var jobs []ResizeBatchJob
+	jobsStr := c.FormValue("tasks")
+	if jobsStr == "" {
+		jobsStr = c.Query("tasks")
 	}
 
 	isBatch := false
-	if tasksStr != "" {
-		if err := json.Unmarshal([]byte(tasksStr), &tasks); err != nil {
+	if jobsStr != "" {
+		if err := json.Unmarshal([]byte(jobsStr), &jobs); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid tasks JSON", "code": 1011})
 		}
 		isBatch = true
@@ -173,10 +174,10 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 		quality, _ := strconv.Atoi(c.Query("quality"))
 		lossless, _ := strconv.ParseBool(c.Query("lossless"))
 
-		tasks = append(tasks, ResizeTask{
+		jobs = append(jobs, ResizeBatchJob{
 			Width:    width,
 			Height:   height,
-			Format:   format,
+			Formats:  []string{format},
 			Quality:  quality,
 			Lossless: lossless,
 		})
@@ -185,7 +186,14 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 	// 7. Process
 	if !isBatch {
 		// Single image response
-		buf, contentType, err := h.processTask(img, tasks[0])
+		task := ResizeTask{
+			Width:    jobs[0].Width,
+			Height:   jobs[0].Height,
+			Format:   jobs[0].Formats[0],
+			Quality:  jobs[0].Quality,
+			Lossless: jobs[0].Lossless,
+		}
+		buf, contentType, err := h.processTask(img, task)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error(), "code": 1007})
 		}
@@ -193,144 +201,206 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 		return c.Send(buf)
 	}
 
-	// Batch response (tar.gz)
-	c.Set("Content-Type", "application/x-tar+gzip")
-	c.Set("Content-Disposition", "attachment; filename=\"images.tar.gz\"")
+	// Batch response
+	archiveType := c.FormValue("archive")
+	if archiveType == "" {
+		archiveType = c.Query("archive")
+	}
+	if archiveType == "" || archiveType == "tar.cz" {
+		archiveType = "tar.gz"
+	}
 
-	gw := gzip.NewWriter(c.Response().BodyWriter())
-	defer gw.Close()
-	tw := tar.NewWriter(gw)
-	defer tw.Close()
+	var addFile func(name string, data []byte) error
+	var closeArchive func() error
+
+	if archiveType == "zip" {
+		c.Set("Content-Type", "application/zip")
+		c.Set("Content-Disposition", "attachment; filename=\"images.zip\"")
+		zw := zip.NewWriter(c.Response().BodyWriter())
+		addFile = func(name string, data []byte) error {
+			f, err := zw.Create(name)
+			if err != nil {
+				return err
+			}
+			_, err = f.Write(data)
+			return err
+		}
+		closeArchive = zw.Close
+	} else if archiveType == "tar" {
+		c.Set("Content-Type", "application/x-tar")
+		c.Set("Content-Disposition", "attachment; filename=\"images.tar\"")
+		tw := tar.NewWriter(c.Response().BodyWriter())
+		addFile = func(name string, data []byte) error {
+			hdr := &tar.Header{
+				Name:    name,
+				Mode:    0644,
+				Size:    int64(len(data)),
+				ModTime: time.Now(),
+			}
+			if err := tw.WriteHeader(hdr); err != nil {
+				return err
+			}
+			_, err := tw.Write(data)
+			return err
+		}
+		closeArchive = tw.Close
+	} else {
+		// Default: tar.gz
+		c.Set("Content-Type", "application/x-tar+gzip")
+		c.Set("Content-Disposition", "attachment; filename=\"images.tar.gz\"")
+		gw := gzip.NewWriter(c.Response().BodyWriter())
+		tw := tar.NewWriter(gw)
+		addFile = func(name string, data []byte) error {
+			hdr := &tar.Header{
+				Name:    name,
+				Mode:    0644,
+				Size:    int64(len(data)),
+				ModTime: time.Now(),
+			}
+			if err := tw.WriteHeader(hdr); err != nil {
+				return err
+			}
+			_, err := tw.Write(data)
+			return err
+		}
+		closeArchive = func() error {
+			tw.Close()
+			return gw.Close()
+		}
+	}
+	defer closeArchive()
 
 	type ImageManifest struct {
 		Filename string `json:"filename"`
 		Width    int    `json:"width"`
 		Height   int    `json:"height"`
 		Format   string `json:"format"`
-		Prefix   string `json:"prefix"`
+		Key      string `json:"key"`
 		Base     string `json:"base"`
 	}
 	var manifest []ImageManifest
 
-	for i, task := range tasks {
+	for i, job := range jobs {
 		// Create new image from buffer for this task to allow independent shrink-on-load
 		taskImg, err := vips.NewImageFromFile(tempPath)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to load image for task", "code": 1012})
 		}
 
-		buf, contentType, err := h.processTask(taskImg, task)
-		var finalWidth, finalHeight int
-		if err == nil {
-			finalWidth = taskImg.Width()
-			finalHeight = taskImg.Height()
+		// Resize once per job
+		originalWidth := taskImg.Width()
+		originalHeight := taskImg.Height()
+		targetWidth := job.Width
+		targetHeight := job.Height
+
+		if targetWidth == 0 && targetHeight == 0 {
+			targetWidth = originalWidth
+			targetHeight = originalHeight
+		} else if targetWidth > 0 && targetHeight == 0 {
+			scale := float64(targetWidth) / float64(originalWidth)
+			targetHeight = int(float64(originalHeight) * scale)
+		} else if targetHeight > 0 && targetWidth == 0 {
+			scale := float64(targetHeight) / float64(originalHeight)
+			targetWidth = int(float64(originalWidth) * scale)
+		}
+
+		// Enforce global maximum dimensions from environment
+		if mwStr := os.Getenv("MAX_WIDTH"); mwStr != "" {
+			if mw, err := strconv.Atoi(mwStr); err == nil && targetWidth > mw {
+				taskImg.Close()
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("width %d exceeds maximum allowed %d", targetWidth, mw)})
+			}
+		}
+		if mhStr := os.Getenv("MAX_HEIGHT"); mhStr != "" {
+			if mh, err := strconv.Atoi(mhStr); err == nil && targetHeight > mh {
+				taskImg.Close()
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("height %d exceeds maximum allowed %d", targetHeight, mh)})
+			}
+		}
+
+		if err := taskImg.Thumbnail(targetWidth, targetHeight, vips.InterestingNone); err != nil {
+			taskImg.Close()
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to resize image", "code": 1006})
+		}
+
+		finalWidth := taskImg.Width()
+		finalHeight := taskImg.Height()
+		pixels := finalWidth * finalHeight
+		effort := getEffort(pixels)
+
+		// Export for each format
+		for _, fmtStr := range job.Formats {
+			buf, contentType, err := h.exportImage(taskImg, fmtStr, job.Quality, job.Lossless, effort, finalWidth, finalHeight)
+			if err != nil {
+				taskImg.Close()
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error(), "code": 1013})
+			}
+
+			ext := "jpg"
+			switch contentType {
+			case "image/png":
+				ext = "png"
+			case "image/webp":
+				ext = "webp"
+			case "image/avif":
+				ext = "avif"
+			case "image/jxl":
+				ext = "jxl"
+			}
+
+			var filename string
+			if job.Key != "" {
+				filename = fmt.Sprintf("%s_%s.%s", originalBaseName, job.Key, ext)
+				if originalBaseName == "" {
+					filename = fmt.Sprintf("image_%s.%s", job.Key, ext)
+				}
+			} else {
+				if originalBaseName == "" {
+					filename = fmt.Sprintf("image_%d.%s", i+1, ext)
+				} else {
+					filename = fmt.Sprintf("%s_%d.%s", originalBaseName, i+1, ext)
+				}
+			}
+
+			if err := addFile(filename, buf); err != nil {
+				taskImg.Close()
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to write to archive", "code": 1015})
+			}
+
+			manifest = append(manifest, ImageManifest{
+				Filename: filename,
+				Width:    finalWidth,
+				Height:   finalHeight,
+				Format:   ext,
+				Key:      job.Key,
+				Base:     originalBaseName,
+			})
 		}
 		taskImg.Close()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error(), "code": 1013})
-		}
-
-		ext := "jpg"
-		switch contentType {
-		case "image/png":
-			ext = "png"
-		case "image/webp":
-			ext = "webp"
-		case "image/avif":
-			ext = "avif"
-		case "image/jxl":
-			ext = "jxl"
-		}
-
-		base := originalBaseName
-		if base == "" {
-			base = "image"
-		}
-		if task.Prefix != "" {
-			base = fmt.Sprintf("%s_%s", base, task.Prefix)
-		}
-		filename := fmt.Sprintf("%s_%d.%s", base, i+1, ext)
-		hdr := &tar.Header{
-			Name:    filename,
-			Mode:    0644,
-			Size:    int64(len(buf)),
-			ModTime: time.Now(),
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to write tar header", "code": 1014})
-		}
-		if _, err := tw.Write(buf); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to write tar body", "code": 1015})
-		}
-
-		manifest = append(manifest, ImageManifest{
-			Filename: filename,
-			Width:    finalWidth,
-			Height:   finalHeight,
-			Format:   ext,
-			Prefix:   task.Prefix,
-			Base:     originalBaseName,
-		})
 	}
 
 	manifestJSON, err := json.MarshalIndent(manifest, "", "  ")
 	if err == nil {
-		hdr := &tar.Header{
-			Name:    "manifest.json",
-			Mode:    0644,
-			Size:    int64(len(manifestJSON)),
-			ModTime: time.Now(),
-		}
-		if err := tw.WriteHeader(hdr); err == nil {
-			tw.Write(manifestJSON)
-		}
+		addFile("manifest.json", manifestJSON)
 	}
 
 	return nil
 }
 
-func (h *ImageHandler) processTask(img *vips.ImageRef, task ResizeTask) ([]byte, string, error) {
-	originalWidth := img.Width()
-	originalHeight := img.Height()
-	pixels := originalWidth * originalHeight
+// Helper struct for single task processing (legacy)
+type ResizeTask struct {
+	Width    int
+	Height   int
+	Format   string
+	Quality  int
+	Lossless bool
+}
 
-	targetWidth := task.Width
-	targetHeight := task.Height
-	format := strings.ToLower(task.Format)
+func (h *ImageHandler) exportImage(img *vips.ImageRef, format string, quality int, lossless bool, effort int, width, height int) ([]byte, string, error) {
+	format = strings.ToLower(format)
 	if format == "" {
 		format = "jpg"
 	}
-	quality := task.Quality
-	lossless := task.Lossless
-
-	if targetWidth == 0 && targetHeight == 0 {
-		targetWidth = originalWidth
-		targetHeight = originalHeight
-	} else if targetWidth > 0 && targetHeight == 0 {
-		scale := float64(targetWidth) / float64(originalWidth)
-		targetHeight = int(float64(originalHeight) * scale)
-	} else if targetHeight > 0 && targetWidth == 0 {
-		scale := float64(targetHeight) / float64(originalHeight)
-		targetWidth = int(float64(originalWidth) * scale)
-	}
-
-	// Enforce global maximum dimensions from environment
-	if mwStr := os.Getenv("MAX_WIDTH"); mwStr != "" {
-		if mw, err := strconv.Atoi(mwStr); err == nil && targetWidth > mw {
-			return nil, "", fmt.Errorf("width %d exceeds maximum allowed %d", targetWidth, mw)
-		}
-	}
-	if mhStr := os.Getenv("MAX_HEIGHT"); mhStr != "" {
-		if mh, err := strconv.Atoi(mhStr); err == nil && targetHeight > mh {
-			return nil, "", fmt.Errorf("height %d exceeds maximum allowed %d", targetHeight, mh)
-		}
-	}
-
-	if err := img.Thumbnail(targetWidth, targetHeight, vips.InterestingNone); err != nil {
-		return nil, "", fmt.Errorf("failed to resize image")
-	}
-
-	effort := getEffort(pixels)
 	var buf []byte
 	var contentType string
 	var err error
@@ -340,7 +410,7 @@ func (h *ImageHandler) processTask(img *vips.ImageRef, task ResizeTask) ([]byte,
 		if os.Getenv("ENABLE_AVIF") == "false" {
 			return nil, "", fmt.Errorf("AVIF format is disabled")
 		}
-		if (targetWidth > h.cfg.Constraints.AVIFMaxResolution || targetHeight > h.cfg.Constraints.AVIFMaxResolution) || (targetWidth*targetHeight > h.cfg.Constraints.AVIFMaxPixels) {
+		if (width > h.cfg.Constraints.AVIFMaxResolution || height > h.cfg.Constraints.AVIFMaxResolution) || (width*height > h.cfg.Constraints.AVIFMaxPixels) {
 			return nil, "", fmt.Errorf("AVIF constraint violation")
 		}
 		params := vips.NewAvifExportParams()
@@ -358,7 +428,7 @@ func (h *ImageHandler) processTask(img *vips.ImageRef, task ResizeTask) ([]byte,
 		if os.Getenv("ENABLE_JXL") == "false" {
 			return nil, "", fmt.Errorf("JXL format is disabled")
 		}
-		if (targetWidth > h.cfg.Constraints.JXLMaxResolution || targetHeight > h.cfg.Constraints.JXLMaxResolution) || (targetWidth*targetHeight > h.cfg.Constraints.JXLMaxPixels) {
+		if (width > h.cfg.Constraints.JXLMaxResolution || height > h.cfg.Constraints.JXLMaxResolution) || (width*height > h.cfg.Constraints.JXLMaxPixels) {
 			return nil, "", fmt.Errorf("JXL constraint violation")
 		}
 		params := vips.NewJxlExportParams()
@@ -411,4 +481,36 @@ func (h *ImageHandler) processTask(img *vips.ImageRef, task ResizeTask) ([]byte,
 	}
 
 	return buf, contentType, nil
+}
+
+// processTask is kept for legacy single-image processing, wrapping the new logic
+func (h *ImageHandler) processTask(img *vips.ImageRef, task ResizeTask) ([]byte, string, error) {
+	originalWidth := img.Width()
+	originalHeight := img.Height()
+
+	targetWidth := task.Width
+	targetHeight := task.Height
+
+	if targetWidth == 0 && targetHeight == 0 {
+		targetWidth = originalWidth
+		targetHeight = originalHeight
+	} else if targetWidth > 0 && targetHeight == 0 {
+		scale := float64(targetWidth) / float64(originalWidth)
+		targetHeight = int(float64(originalHeight) * scale)
+	} else if targetHeight > 0 && targetWidth == 0 {
+		scale := float64(targetHeight) / float64(originalHeight)
+		targetWidth = int(float64(originalWidth) * scale)
+	}
+
+	// Resize
+	if err := img.Thumbnail(targetWidth, targetHeight, vips.InterestingNone); err != nil {
+		return nil, "", fmt.Errorf("failed to resize image")
+	}
+
+	finalWidth := img.Width()
+	finalHeight := img.Height()
+	pixels := finalWidth * finalHeight
+	effort := getEffort(pixels)
+
+	return h.exportImage(img, task.Format, task.Quality, task.Lossless, effort, finalWidth, finalHeight)
 }
