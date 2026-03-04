@@ -100,7 +100,7 @@ func main() {
 
 	app := fiber.New(fiber.Config{
 		// Image uploads can be large, default is 4MB.
-		BodyLimit:    10 * 1024 * 1024,
+		BodyLimit:    50 * 1024 * 1024,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		ErrorHandler: func(c *fiber.Ctx, err error) error {

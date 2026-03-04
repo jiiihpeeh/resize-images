@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image-resizer/config"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -66,9 +67,20 @@ func getEffort(pixels int) int {
 }
 
 func (h *ImageHandler) Resize(c *fiber.Ctx) error {
-	var img *vips.ImageRef
 	var err error
 	var originalBaseName string
+	var tempPath string
+
+	// Create a temp file to store the image for processing
+	// We use a temp file to avoid holding the entire image in memory
+	// and to allow efficient random access by libvips.
+	tmpFile, err := os.CreateTemp("", "image-resizer-*.img")
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create temp file", "code": 1016})
+	}
+	tempPath = tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tempPath)
 
 	if c.Method() == fiber.MethodPost {
 		// Handle file upload from multipart form
@@ -79,15 +91,8 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 		originalFilename := fileHeader.Filename
 		originalBaseName = strings.TrimSuffix(originalFilename, filepath.Ext(originalFilename))
 
-		file, err := fileHeader.Open()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to open uploaded image", "code": 1010})
-		}
-		defer file.Close()
-
-		img, err = vips.NewImageFromReader(file)
-		if err != nil {
-			return c.Status(fiber.StatusUnsupportedMediaType).JSON(fiber.Map{"error": "Failed to decode uploaded image", "code": 1005})
+		if err := c.SaveFile(fileHeader, tempPath); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save uploaded image", "code": 1010})
 		}
 	} else {
 		// Handle URL download from query param
@@ -128,10 +133,22 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": fmt.Sprintf("Failed to download image: status %d", resp.StatusCode), "code": 1004})
 		}
 
-		img, err = vips.NewImageFromReader(resp.Body)
+		// Write download to temp file
+		f, err := os.Create(tempPath)
 		if err != nil {
-			return c.Status(fiber.StatusUnsupportedMediaType).JSON(fiber.Map{"error": "Failed to decode image", "code": 1005})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to open temp file", "code": 1016})
 		}
+		_, err = io.Copy(f, resp.Body)
+		f.Close()
+		if err != nil {
+			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"error": "Failed to save downloaded image", "code": 1004})
+		}
+	}
+
+	// Load image to check validity and get dimensions
+	img, err := vips.NewImageFromFile(tempPath)
+	if err != nil {
+		return c.Status(fiber.StatusUnsupportedMediaType).JSON(fiber.Map{"error": "Failed to decode image", "code": 1005})
 	}
 	defer img.Close()
 
@@ -196,10 +213,10 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 	var manifest []ImageManifest
 
 	for i, task := range tasks {
-		// Copy image for this task to avoid destructive operations affecting others
-		taskImg, err := img.Copy()
+		// Create new image from buffer for this task to allow independent shrink-on-load
+		taskImg, err := vips.NewImageFromFile(tempPath)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to copy image", "code": 1012})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to load image for task", "code": 1012})
 		}
 
 		buf, contentType, err := h.processTask(taskImg, task)

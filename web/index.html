@@ -222,6 +222,7 @@
                 setResult(null);
                 setMessage('');
 
+                setStatusText('Uploading...');
                 const formData = new FormData();
                 formData.append('image', file);
 
@@ -245,6 +246,9 @@
                     if (event.lengthComputable && progressBar) {
                         const percentComplete = (event.loaded / event.total) * 100;
                         progressBar.style.width = percentComplete + '%';
+                        if (percentComplete === 100) {
+                            setStatusText('Processing...');
+                        }
                     }
                 });
 
@@ -335,7 +339,7 @@
 
                         <button type="button" onClick=${addTask} style=${{marginBottom: '1rem', backgroundColor: '#6b7280'}}>+ Add Variant</button>
 
-                        <button type="submit" disabled=${loading}>${loading ? 'Processing...' : 'Process Images'}</button>
+                        <button type="submit" disabled=${loading}>${loading ? statusText : 'Process Images'}</button>
 
                         <div id="progress-container" style="display: none;">
                             <div class="progress-bar-container">
