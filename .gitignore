@@ -1,0 +1,25 @@
+# Binaries
+image-resizer
+
+# Environment variables
+.env
+
+# SQLite database
+users.db
+
+# Output files
+*.jpg
+*.png
+*.webp
+*.avif
+*.jxl
+*.tar.gz
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE specific
+.idea/
+.vscode/
+*.swp
