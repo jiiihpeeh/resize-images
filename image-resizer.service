@@ -1,0 +1,14 @@
+[Unit]
+Description=Image Resizer Microservice
+After=network.target
+
+[Service]
+Type=simple
+User=j-p
+WorkingDirectory=/home/j-p/resize-img-microservice
+ExecStart=/home/j-p/resize-img-microservice/image-resizer
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

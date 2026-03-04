@@ -220,6 +220,21 @@ Requests exceeding these limits return an error.
 | 1007 | Failed to export image |
 | 1008 | Constraint violation (AVIF/JXL limits) |
 
+## Deployment (Linux Systemd)
+
+To run the service on Linux startup:
+
+1.  Edit `image-resizer.service` to match your user and paths if different from defaults.
+2.  Copy the service file:
+    ```bash
+    sudo cp image-resizer.service /etc/systemd/system/
+    ```
+3.  Reload systemd and enable the service:
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now image-resizer
+    ```
+
 ## Development
 
 ```bash
