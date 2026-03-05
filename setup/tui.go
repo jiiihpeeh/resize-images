@@ -25,7 +25,7 @@ type model struct {
 
 func initialModel() model {
 	m := model{
-		inputs: make([]textinput.Model, 8),
+		inputs: make([]textinput.Model, 9),
 	}
 
 	var t textinput.Model
@@ -72,6 +72,10 @@ func initialModel() model {
 			t.Prompt = "Registration Secret: "
 			t.EchoMode = textinput.EchoPassword
 			t.EchoCharacter = '•'
+		case 8:
+			t.Placeholder = "50051"
+			t.SetValue("50051")
+			t.Prompt = "gRPC Port: "
 		}
 
 		m.inputs[i] = t
@@ -105,8 +109,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				concurrent := m.inputs[5].Value()
 				rate := m.inputs[6].Value()
 				regSecret := m.inputs[7].Value()
+				grpcPort := m.inputs[8].Value()
 
-				if err := saveConfig(port, secret, user, pass, hosts, concurrent, rate, regSecret); err != nil {
+				if err := saveConfig(port, secret, user, pass, hosts, concurrent, rate, regSecret, grpcPort); err != nil {
 					fmt.Printf("Error saving config: %v\n", err)
 					return m, tea.Quit
 				}
@@ -195,10 +200,11 @@ func Run() {
 	}
 }
 
-func saveConfig(port, secret, user, pass, hosts, concurrent, rate, regSecret string) error {
+func saveConfig(port, secret, user, pass, hosts, concurrent, rate, regSecret, grpcPort string) error {
 	content := fmt.Sprintf(`# Server Configuration
 SERVER_HOST=0.0.0.0
 SERVER_PORT=%s
+GRPC_PORT=%s
 
 # JWT Configuration
 JWT_SECRET=%q
@@ -240,6 +246,6 @@ ENABLE_JXL=true
 # Rate limiting
 MAX_CONCURRENT=%s
 REQUESTS_PER_MIN=%s
-`, port, secret, user, pass, regSecret, hosts, concurrent, rate)
+`, port, grpcPort, secret, user, pass, regSecret, hosts, concurrent, rate)
 	return os.WriteFile(".env", []byte(content), 0644)
 }
