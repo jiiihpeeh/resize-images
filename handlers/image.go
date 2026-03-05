@@ -186,14 +186,7 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 	// 7. Process
 	if !isBatch {
 		// Single image response
-		task := ResizeTask{
-			Width:    jobs[0].Width,
-			Height:   jobs[0].Height,
-			Format:   jobs[0].Formats[0],
-			Quality:  jobs[0].Quality,
-			Lossless: jobs[0].Lossless,
-		}
-		buf, contentType, err := h.processTask(img, task)
+		buf, contentType, err := h.ProcessSingle(tempPath, jobs[0])
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error(), "code": 1007})
 		}
@@ -210,14 +203,32 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 		archiveType = "tar.gz"
 	}
 
+	if archiveType == "zip" {
+		c.Set("Content-Type", "application/zip")
+		c.Set("Content-Disposition", "attachment; filename=\"images.zip\"")
+	} else if archiveType == "tar" {
+		c.Set("Content-Type", "application/x-tar")
+		c.Set("Content-Disposition", "attachment; filename=\"images.tar\"")
+	} else {
+		c.Set("Content-Type", "application/x-tar+gzip")
+		c.Set("Content-Disposition", "attachment; filename=\"images.tar.gz\"")
+	}
+
+	if err := h.ProcessBatch(c.Response().BodyWriter(), tempPath, jobs, archiveType, originalBaseName); err != nil {
+		// Note: If writing has started, this error might corrupt the stream.
+		// In a real scenario, we might want to log this.
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error(), "code": 1015})
+	}
+
+	return nil
+}
+
+func (h *ImageHandler) ProcessBatch(w io.Writer, imagePath string, jobs []ResizeBatchJob, archiveType string, originalBaseName string) error {
 	var addFile func(name string, data []byte) error
 	var closeArchive func() error
 
-	switch archiveType {
-	case "zip":
-		c.Set("Content-Type", "application/zip")
-		c.Set("Content-Disposition", "attachment; filename=\"images.zip\"")
-		zw := zip.NewWriter(c.Response().BodyWriter())
+	if archiveType == "zip" {
+		zw := zip.NewWriter(w)
 		addFile = func(name string, data []byte) error {
 			f, err := zw.Create(name)
 			if err != nil {
@@ -227,10 +238,8 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 			return err
 		}
 		closeArchive = zw.Close
-	case "tar":
-		c.Set("Content-Type", "application/x-tar")
-		c.Set("Content-Disposition", "attachment; filename=\"images.tar\"")
-		tw := tar.NewWriter(c.Response().BodyWriter())
+	} else if archiveType == "tar" {
+		tw := tar.NewWriter(w)
 		addFile = func(name string, data []byte) error {
 			hdr := &tar.Header{
 				Name:    name,
@@ -245,11 +254,9 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 			return err
 		}
 		closeArchive = tw.Close
-	default:
+	} else {
 		// Default: tar.gz
-		c.Set("Content-Type", "application/x-tar+gzip")
-		c.Set("Content-Disposition", "attachment; filename=\"images.tar.gz\"")
-		gw := gzip.NewWriter(c.Response().BodyWriter())
+		gw := gzip.NewWriter(w)
 		tw := tar.NewWriter(gw)
 		addFile = func(name string, data []byte) error {
 			hdr := &tar.Header{
@@ -283,9 +290,9 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 
 	for i, job := range jobs {
 		// Create new image from buffer for this task to allow independent shrink-on-load
-		taskImg, err := vips.NewImageFromFile(tempPath)
+		taskImg, err := vips.NewImageFromFile(imagePath)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to load image for task", "code": 1012})
+			return fmt.Errorf("failed to load image for task: %w", err)
 		}
 
 		// Resize once per job
@@ -309,19 +316,19 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 		if mwStr := os.Getenv("MAX_WIDTH"); mwStr != "" {
 			if mw, err := strconv.Atoi(mwStr); err == nil && targetWidth > mw {
 				taskImg.Close()
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("width %d exceeds maximum allowed %d", targetWidth, mw)})
+				return fmt.Errorf("width %d exceeds maximum allowed %d", targetWidth, mw)
 			}
 		}
 		if mhStr := os.Getenv("MAX_HEIGHT"); mhStr != "" {
 			if mh, err := strconv.Atoi(mhStr); err == nil && targetHeight > mh {
 				taskImg.Close()
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": fmt.Sprintf("height %d exceeds maximum allowed %d", targetHeight, mh)})
+				return fmt.Errorf("height %d exceeds maximum allowed %d", targetHeight, mh)
 			}
 		}
 
 		if err := taskImg.Thumbnail(targetWidth, targetHeight, vips.InterestingNone); err != nil {
 			taskImg.Close()
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to resize image", "code": 1006})
+			return fmt.Errorf("failed to resize image: %w", err)
 		}
 
 		finalWidth := taskImg.Width()
@@ -334,7 +341,7 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 			buf, contentType, err := h.exportImage(taskImg, fmtStr, job.Quality, job.Lossless, effort, finalWidth, finalHeight)
 			if err != nil {
 				taskImg.Close()
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error(), "code": 1013})
+				return fmt.Errorf("failed to export image: %w", err)
 			}
 
 			ext := "jpg"
@@ -365,7 +372,7 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 
 			if err := addFile(filename, buf); err != nil {
 				taskImg.Close()
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to write to archive", "code": 1015})
+				return fmt.Errorf("failed to write to archive: %w", err)
 			}
 
 			manifest = append(manifest, ImageManifest{
@@ -388,6 +395,23 @@ func (h *ImageHandler) Resize(c *fiber.Ctx) error {
 	return nil
 }
 
+func (h *ImageHandler) ProcessSingle(imagePath string, job ResizeBatchJob) ([]byte, string, error) {
+	img, err := vips.NewImageFromFile(imagePath)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to decode image: %w", err)
+	}
+	defer img.Close()
+
+	task := ResizeTask{
+		Width:    job.Width,
+		Height:   job.Height,
+		Format:   job.Formats[0],
+		Quality:  job.Quality,
+		Lossless: job.Lossless,
+	}
+	return h.processTask(img, task)
+}
+
 // Helper struct for single task processing (legacy)
 type ResizeTask struct {
 	Width    int
@@ -407,9 +431,9 @@ func (h *ImageHandler) exportImage(img *vips.ImageRef, format string, quality in
 	if quality > 0 {
 		switch format {
 		case "avif":
-			quality = int(float64(quality) * 0.78)
+			quality = int(float64(quality) * 0.75)
 		case "jxl":
-			quality = int(float64(quality) * 0.70)
+			quality = int(float64(quality) * 0.90)
 		}
 		if quality < 1 {
 			quality = 1

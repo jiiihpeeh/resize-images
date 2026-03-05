@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"runtime/debug"
@@ -18,9 +19,13 @@ import (
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
 
+	"google.golang.org/grpc"
+
 	"image-resizer/config"
+	grpc_server "image-resizer/grpc"
 	"image-resizer/handlers"
 	"image-resizer/middleware"
+	"image-resizer/pb"
 	"image-resizer/setup"
 )
 
@@ -144,6 +149,24 @@ func main() {
 		addr := fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port)
 		if err := app.Listen(addr); err != nil {
 			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	// Start gRPC server
+	go func() {
+		grpcPort := os.Getenv("GRPC_PORT")
+		if grpcPort == "" {
+			grpcPort = "50051"
+		}
+		lis, err := net.Listen("tcp", ":"+grpcPort)
+		if err != nil {
+			log.Fatalf("Failed to listen for gRPC: %v", err)
+		}
+		s := grpc.NewServer()
+		pb.RegisterResizerServer(s, grpc_server.NewServer(imageHandler))
+		log.Printf("gRPC server listening on :%s", grpcPort)
+		if err := s.Serve(lis); err != nil {
+			log.Fatalf("Failed to serve gRPC: %v", err)
 		}
 	}()
 

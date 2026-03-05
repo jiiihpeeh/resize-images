@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package pb;
+
+option go_package = "image-resizer/pb";
+
+service Resizer {
+  rpc Resize (stream ResizeRequest) returns (stream ResizeResponse);
+}
+
+message ResizeRequest {
+  oneof payload {
+    ResizeMetadata metadata = 1;
+    bytes chunk = 2;
+  }
+}
+
+message ResizeMetadata {
+  repeated Task tasks = 1;
+  string archive_type = 2;
+}
+
+message Task {
+  string key = 1;
+  int32 width = 2;
+  int32 height = 3;
+  repeated string formats = 4;
+  int32 quality = 5;
+  bool lossless = 6;
+}
+
+message ResizeResponse {
+  oneof payload {
+    ResponseMetadata metadata = 1;
+    bytes chunk = 2;
+  }
+}
+
+message ResponseMetadata {
+  string content_type = 1;
+  string filename = 2;
+}
